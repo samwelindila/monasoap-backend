@@ -1,125 +1,196 @@
-const router = require('express').Router();
+// routes/products.js
+const express = require('express');
+const router = express.Router();
 const multer = require('multer');
-const path = require('path');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('cloudinary').v2;
 const Product = require('../models/Product');
-const auth = require('../middleware/auth');
 
-// Multer setup
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
+// Configure Cloudinary storage for products (supports multiple files)
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'monasoap-products',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 1000, height: 1000, crop: 'limit' }]
   }
 });
 
-const upload = multer({ storage });
+// Configure multer for multiple images (max 5)
+const upload = multer({ 
+  storage: storage,
+  limits: { files: 5 }
+});
 
-// GET all products (public)
+// GET all products (with optional search and category filters)
 router.get('/', async (req, res) => {
   try {
-    const { category, search } = req.query;
+    const { search, category } = req.query;
     let query = {};
-    if (category) query.category = category;
-    if (search) query.name = { $regex: search, $options: 'i' };
+    
+    if (search && search.trim()) {
+      query.name = { $regex: search.trim(), $options: 'i' };
+    }
+    if (category && category.trim()) {
+      query.category = category;
+    }
+    
     const products = await Product.find(query).sort({ createdAt: -1 });
     res.json(products);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    res.status(500).json({ message: error.message });
   }
 });
 
-// GET single product (public)
+// GET single product
 router.get('/:id', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
     res.json(product);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+  } catch (error) {
+    console.error('Error fetching product:', error);
+    res.status(500).json({ message: error.message });
   }
 });
 
-// CREATE product (admin only)
-router.post('/', auth, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ message: 'Admin access only' });
-  }
-  upload.fields([
-    { name: 'images', maxCount: 5 },
-    { name: 'videos', maxCount: 3 }
-  ])(req, res, async (err) => {
-    if (err) return res.status(400).json({ message: err.message });
-    try {
-      const { name, description, price, quantity, category } = req.body;
-      const images = req.files['images']
-        ? req.files['images'].map(f => f.filename)
-        : [];
-      const videos = req.files['videos']
-        ? req.files['videos'].map(f => f.filename)
-        : [];
-      const product = await Product.create({
-        name, description,
-        price: Number(price),
-        quantity: Number(quantity),
-        category, images, videos,
-        isAvailable: Number(quantity) > 0
-      });
-      res.status(201).json(product);
-    } catch (err) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-});
-
-// UPDATE product (admin only)
-router.put('/:id', auth, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ message: 'Admin access only' });
-  }
-  upload.fields([
-    { name: 'images', maxCount: 5 },
-    { name: 'videos', maxCount: 3 }
-  ])(req, res, async (err) => {
-    if (err) return res.status(400).json({ message: err.message });
-    try {
-      const { name, description, price, quantity, category } = req.body;
-      const updateData = {
-        name, description,
-        price: Number(price),
-        quantity: Number(quantity),
-        category,
-        isAvailable: Number(quantity) > 0
-      };
-      if (req.files['images']) {
-        updateData.images = req.files['images'].map(f => f.filename);
-      }
-      if (req.files['videos']) {
-        updateData.videos = req.files['videos'].map(f => f.filename);
-      }
-      const product = await Product.findByIdAndUpdate(
-        req.params.id, updateData, { new: true }
-      );
-      if (!product) return res.status(404).json({ message: 'Product not found' });
-      res.json(product);
-    } catch (err) {
-      res.status(500).json({ message: err.message });
-    }
-  });
-});
-
-// DELETE product (admin only)
-router.delete('/:id', auth, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ message: 'Admin access only' });
-  }
+// CREATE product with multiple image uploads
+router.post('/', upload.array('images', 5), async (req, res) => {
   try {
-    const product = await Product.findByIdAndDelete(req.params.id);
+    // Get Cloudinary URLs for all uploaded images
+    const imageUrls = req.files ? req.files.map(file => file.path) : [];
+    
+    // Get video URLs from request body (if any)
+    let videoUrls = [];
+    if (req.body.videos) {
+      try {
+        videoUrls = typeof req.body.videos === 'string' ? JSON.parse(req.body.videos) : req.body.videos;
+      } catch {
+        videoUrls = [];
+      }
+    }
+    
+    const productData = {
+      name: req.body.name,
+      description: req.body.description,
+      price: parseFloat(req.body.price),
+      category: req.body.category,
+      quantity: parseInt(req.body.quantity) || 0,
+      images: imageUrls,  // Array of Cloudinary URLs
+      videos: videoUrls,  // Array of video URLs/paths
+      isAvailable: (parseInt(req.body.quantity) || 0) > 0
+    };
+    
+    const product = new Product(productData);
+    await product.save();
+    
+    console.log(`✅ Product created: ${product.name} with ${imageUrls.length} image(s)`);
+    res.status(201).json(product);
+  } catch (error) {
+    console.error('Error creating product:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// UPDATE product with optional new images
+router.put('/:id', upload.array('images', 5), async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
-    res.json({ message: 'Product deleted' });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+    
+    // Update text fields
+    if (req.body.name) product.name = req.body.name;
+    if (req.body.description) product.description = req.body.description;
+    if (req.body.price) product.price = parseFloat(req.body.price);
+    if (req.body.category) product.category = req.body.category;
+    if (req.body.quantity) {
+      product.quantity = parseInt(req.body.quantity);
+      product.isAvailable = product.quantity > 0;
+    }
+    
+    // Update videos if provided
+    if (req.body.videos) {
+      try {
+        product.videos = typeof req.body.videos === 'string' ? JSON.parse(req.body.videos) : req.body.videos;
+      } catch (err) {
+        console.error('Error parsing videos:', err);
+      }
+    }
+    
+    // If new images were uploaded
+    if (req.files && req.files.length > 0) {
+      // Optional: Delete old images from Cloudinary
+      if (product.images && product.images.length > 0) {
+        for (const oldImageUrl of product.images) {
+          try {
+            // Extract public ID from Cloudinary URL
+            const publicId = oldImageUrl.split('/').slice(-2).join('/').split('.')[0];
+            await cloudinary.uploader.destroy(publicId);
+            console.log(`🗑️ Deleted old image: ${publicId}`);
+          } catch (err) {
+            console.error('Error deleting old image:', err);
+          }
+        }
+      }
+      
+      // Set new images
+      product.images = req.files.map(file => file.path);
+    }
+    
+    await product.save();
+    console.log(`✅ Product updated: ${product.name}`);
+    res.json(product);
+  } catch (error) {
+    console.error('Error updating product:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// DELETE product (and delete images from Cloudinary)
+router.delete('/:id', async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+    
+    // Delete all images from Cloudinary
+    if (product.images && product.images.length > 0) {
+      for (const imageUrl of product.images) {
+        try {
+          // Extract public ID from Cloudinary URL
+          const publicId = imageUrl.split('/').slice(-2).join('/').split('.')[0];
+          await cloudinary.uploader.destroy(publicId);
+          console.log(`🗑️ Deleted image from Cloudinary: ${publicId}`);
+        } catch (err) {
+          console.error('Error deleting image:', err);
+        }
+      }
+    }
+    
+    await product.deleteOne();
+    console.log(`✅ Product deleted: ${product.name}`);
+    res.json({ message: 'Product deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting product:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Optional: Endpoint for single image upload (for settings/about page)
+router.post('/upload', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
+    
+    res.json({
+      success: true,
+      imageUrl: req.file.path,
+      publicId: req.file.filename
+    });
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

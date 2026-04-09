@@ -4,23 +4,30 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
 const multer = require('multer');
-const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 dotenv.config();
 
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
 const app = express();
 
-// Configure multer for file uploads
-const uploadDir = 'uploads/';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+// Configure multer with Cloudinary storage for general uploads
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'monasoap',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 1000, height: 1000, crop: 'limit' }]
+  }
 });
-const upload = multer({ storage });
+const upload = multer({ storage: storage });
 
 // Middleware
 app.use(cors({
@@ -34,7 +41,6 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ========== SETTINGS MODEL ==========
 const settingsSchema = new mongoose.Schema({
@@ -115,7 +121,7 @@ app.put('/api/settings', upload.single('aboutUsImage'), async (req, res) => {
     }
 
     if (req.file) {
-      updateData.aboutUsImage = req.file.filename;
+      updateData.aboutUsImage = req.file.path;
     }
 
     Object.keys(updateData).forEach(key => {
@@ -149,9 +155,7 @@ app.put('/api/settings', upload.single('aboutUsImage'), async (req, res) => {
   }
 });
 
-// ========== ANNOUNCEMENTS ROUTES (DATABASE VERSION) ==========
-
-// GET all announcements
+// ========== ANNOUNCEMENTS ROUTES ==========
 app.get('/api/announcements', async (req, res) => {
   try {
     const announcements = await Announcement.find().sort({ order: 1, createdAt: -1 });
@@ -163,7 +167,6 @@ app.get('/api/announcements', async (req, res) => {
   }
 });
 
-// GET all announcements (alias for /all endpoint)
 app.get('/api/announcements/all', async (req, res) => {
   try {
     const announcements = await Announcement.find().sort({ order: 1, createdAt: -1 });
@@ -173,7 +176,6 @@ app.get('/api/announcements/all', async (req, res) => {
   }
 });
 
-// CREATE new announcement
 app.post('/api/announcements', async (req, res) => {
   try {
     const { text, isActive, order } = req.body;
@@ -202,7 +204,6 @@ app.post('/api/announcements', async (req, res) => {
   }
 });
 
-// UPDATE announcement
 app.put('/api/announcements/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -231,7 +232,6 @@ app.put('/api/announcements/:id', async (req, res) => {
   }
 });
 
-// PATCH announcement (for partial updates like toggling status)
 app.patch('/api/announcements/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -262,7 +262,6 @@ app.patch('/api/announcements/:id', async (req, res) => {
   }
 });
 
-// DELETE announcement
 app.delete('/api/announcements/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -280,7 +279,7 @@ app.delete('/api/announcements/:id', async (req, res) => {
   }
 });
 
-// ========== EXISTING ROUTES ==========
+// ========== ROUTES ==========
 try {
   app.use('/api/auth', require('./routes/auth'));
   console.log('✅ Loaded route: /api/auth');
@@ -297,12 +296,10 @@ try {
 } catch (err) { console.log('⚠️ Orders route not found'); }
 
 // ========== REVIEWS ROUTES ==========
-// ========== REVIEWS ROUTES (MongoDB) ==========
 const Review = require('./models/Review');
 const User = require('./models/User');
 const auth = require('./middleware/auth');
 
-// GET all reviews (for homepage display)
 app.get('/api/reviews', async (req, res) => {
   try {
     const reviews = await Review.find()
@@ -315,11 +312,10 @@ app.get('/api/reviews', async (req, res) => {
   }
 });
 
-// GET reviews for a specific product
 app.get('/api/reviews/:productId', async (req, res) => {
   try {
     const reviews = await Review.find({ product: req.params.productId })
-      .populate('customer', 'name')   // ← THIS is what pulls the name
+      .populate('customer', 'name')
       .sort({ createdAt: -1 });
 
     const safeReviews = reviews.map(r => {
@@ -339,7 +335,6 @@ app.get('/api/reviews/:productId', async (req, res) => {
   }
 });
 
-// POST a new review (requires login)
 app.post('/api/reviews', auth, async (req, res) => {
   try {
     const { productId, rating, comment } = req.body;
@@ -348,7 +343,6 @@ app.post('/api/reviews', auth, async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Check if user already reviewed this product
     const existing = await Review.findOne({
       customer: req.user.id,
       product: productId
@@ -358,23 +352,13 @@ app.post('/api/reviews', auth, async (req, res) => {
       return res.status(400).json({ message: 'You already reviewed this product' });
     }
 
-    // Optional: check if user ordered the product
-    // const Order = require('./models/Order');
-    // const ordered = await Order.findOne({
-    //   customer: req.user.id,
-    //   'products.product': productId,
-    //   status: 'delivered'
-    // });
-    // if (!ordered) return res.status(403).json({ message: 'You can only review products you have received' });
-
     const review = await Review.create({
-      customer: req.user.id,   // ← saves the real user ID
+      customer: req.user.id,
       product: productId,
       rating: Number(rating),
       comment
     });
 
-    // Populate name before sending back
     await review.populate('customer', 'name');
 
     console.log(`✅ New review added for product ${productId}: ${rating} stars by ${review.customer?.name}`);
@@ -384,7 +368,6 @@ app.post('/api/reviews', auth, async (req, res) => {
   }
 });
 
-// GET review summary for a product
 app.get('/api/reviews/product/:productId/summary', async (req, res) => {
   try {
     const reviews = await Review.find({ product: req.params.productId });
@@ -397,7 +380,6 @@ app.get('/api/reviews/product/:productId/summary', async (req, res) => {
   }
 });
 
-// DELETE review (admin only)
 app.delete('/api/reviews/:id', auth, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -409,6 +391,7 @@ app.delete('/api/reviews/:id', auth, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
 // ========== CONTACT MESSAGES ROUTES ==========
 let contactMessages = [
   { _id: '1', name: 'Jane Doe', email: 'jane@example.com', phone: '255712345678', message: 'I love your soaps! Do you have wholesale prices?', createdAt: new Date().toISOString(), status: 'unread' },
@@ -494,6 +477,29 @@ app.delete('/api/contact/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Failed to delete contact message' }); }
 });
 
+// ========== GENERAL IMAGE UPLOAD ENDPOINT ==========
+app.post('/api/upload', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
+    
+    const imageUrl = req.file.path;
+    const publicId = req.file.filename;
+    
+    console.log(`✅ Image uploaded to Cloudinary: ${publicId}`);
+    
+    res.json({
+      success: true,
+      imageUrl: imageUrl,
+      publicId: publicId
+    });
+  } catch (error) {
+    console.error('Upload error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ========== AI CHATBOT ==========
 app.post('/api/chat', async (req, res) => {
   try {
@@ -571,7 +577,8 @@ app.get('/', (req, res) => {
       announcements: '/api/announcements',
       settings: '/api/settings',
       contact: '/api/contact',
-      reviews: '/api/reviews'
+      reviews: '/api/reviews',
+      upload: '/api/upload'
     }
   });
 });
@@ -589,6 +596,7 @@ if (process.env.MONGO_URI) {
         console.log(`⭐ Reviews: http://localhost:${PORT}/api/reviews`);
         console.log(`📧 Contact: http://localhost:${PORT}/api/contact`);
         console.log(`🤖 AI Chatbot: http://localhost:${PORT}/api/chat`);
+        console.log(`☁️ Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME ? '✅ Configured' : '❌ MISSING'}`);
         console.log(`🔑 Anthropic API Key: ${process.env.ANTHROPIC_API_KEY ? '✅ Set' : '❌ MISSING'}`);
       });
     })
@@ -598,5 +606,6 @@ if (process.env.MONGO_URI) {
   app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log('⚠️ MONGO_URI not set - using in-memory storage only');
+    console.log(`☁️ Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME ? '✅ Configured' : '❌ MISSING'}`);
   });
 }
