@@ -1,20 +1,14 @@
+// ✅ dotenv MUST be first before any other require()
+const dotenv = require('dotenv');
+dotenv.config();
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const path = require('path');
 const multer = require('multer');
-const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-
-dotenv.config();
-
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
+const cloudinary = require('./config/cloudinary'); // ✅ shared config
 
 const app = express();
 
@@ -121,7 +115,7 @@ app.put('/api/settings', upload.single('aboutUsImage'), async (req, res) => {
     }
 
     if (req.file) {
-      updateData.aboutUsImage = req.file.path;
+      updateData.aboutUsImage = req.file.path; // ✅ full Cloudinary URL
     }
 
     Object.keys(updateData).forEach(key => {
@@ -179,20 +173,20 @@ app.get('/api/announcements/all', async (req, res) => {
 app.post('/api/announcements', async (req, res) => {
   try {
     const { text, isActive, order } = req.body;
-    
+
     if (!text || !text.trim()) {
       return res.status(400).json({ success: false, message: 'Announcement text is required' });
     }
-    
+
     const newAnnouncement = new Announcement({
       text: text.trim(),
       isActive: isActive !== undefined ? isActive : true,
       order: order || 0
     });
-    
+
     await newAnnouncement.save();
     console.log(`✅ Announcement created: "${newAnnouncement.text.substring(0, 50)}"`);
-    
+
     res.json({
       success: true,
       message: 'Announcement created successfully',
@@ -208,19 +202,19 @@ app.put('/api/announcements/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { text, isActive, order } = req.body;
-    
+
     const announcement = await Announcement.findById(id);
     if (!announcement) {
       return res.status(404).json({ success: false, message: 'Announcement not found' });
     }
-    
+
     if (text !== undefined) announcement.text = text.trim();
     if (isActive !== undefined) announcement.isActive = isActive;
     if (order !== undefined) announcement.order = order;
-    
+
     await announcement.save();
     console.log(`✅ Announcement updated: ${id}`);
-    
+
     res.json({
       success: true,
       message: 'Announcement updated successfully',
@@ -236,21 +230,21 @@ app.patch('/api/announcements/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
-    
+
     const announcement = await Announcement.findById(id);
     if (!announcement) {
       return res.status(404).json({ success: false, message: 'Announcement not found' });
     }
-    
+
     Object.keys(updates).forEach(key => {
       if (key !== '_id' && key !== '__v') {
         announcement[key] = updates[key];
       }
     });
-    
+
     await announcement.save();
     console.log(`✅ Announcement patched: ${id}`);
-    
+
     res.json({
       success: true,
       message: 'Announcement updated successfully',
@@ -266,11 +260,11 @@ app.delete('/api/announcements/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const announcement = await Announcement.findByIdAndDelete(id);
-    
+
     if (!announcement) {
       return res.status(404).json({ success: false, message: 'Announcement not found' });
     }
-    
+
     console.log(`✅ Announcement deleted: ${id}`);
     res.json({ success: true, message: 'Announcement deleted successfully' });
   } catch (error) {
@@ -283,17 +277,17 @@ app.delete('/api/announcements/:id', async (req, res) => {
 try {
   app.use('/api/auth', require('./routes/auth'));
   console.log('✅ Loaded route: /api/auth');
-} catch (err) { console.log('⚠️ Auth route not found'); }
+} catch (err) { console.log('⚠️ Auth route not found:', err.message); }
 
 try {
   app.use('/api/products', require('./routes/products'));
   console.log('✅ Loaded route: /api/products');
-} catch (err) { console.log('⚠️ Products route not found'); }
+} catch (err) { console.log('⚠️ Products route not found:', err.message); }
 
 try {
   app.use('/api/orders', require('./routes/orders'));
   console.log('✅ Loaded route: /api/orders');
-} catch (err) { console.log('⚠️ Orders route not found'); }
+} catch (err) { console.log('⚠️ Orders route not found:', err.message); }
 
 // ========== REVIEWS ROUTES ==========
 const Review = require('./models/Review');
@@ -483,12 +477,13 @@ app.post('/api/upload', upload.single('image'), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ success: false, error: 'No file uploaded' });
     }
-    
-    const imageUrl = req.file.path;
+
+    const imageUrl = req.file.path;   // ✅ full Cloudinary https:// URL
     const publicId = req.file.filename;
-    
+
     console.log(`✅ Image uploaded to Cloudinary: ${publicId}`);
-    
+    console.log(`🖼️ Image URL: ${imageUrl}`);
+
     res.json({
       success: true,
       imageUrl: imageUrl,
@@ -557,6 +552,7 @@ app.get('/api/chat/test', (req, res) => {
   res.json({
     status: 'AI Chatbot is ready!',
     aiEnabled: !!process.env.ANTHROPIC_API_KEY,
+    cloudinaryConfigured: !!process.env.CLOUDINARY_CLOUD_NAME,
     port: process.env.PORT || 5000
   });
 });
