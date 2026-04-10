@@ -2,67 +2,91 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const cloudinary = require('../config/cloudinary');
 const Product = require('../models/Product');
 
-// ✅ Storage config for IMAGES
-const imageStorage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'monasoap-products',
-    resource_type: 'image',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-    transformation: [{ width: 1000, height: 1000, crop: 'limit' }]
-  }
+// ✅ Use memory storage - we'll upload to Cloudinary manually
+// This lets us handle images and videos differently
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB max
 });
 
-// ✅ Storage config for VIDEOS
-const videoStorage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'monasoap-products-videos',
-    resource_type: 'video',
-    allowed_formats: ['mp4', 'mov', 'avi', 'mkv', 'webm'],
-  }
-});
+// ✅ Upload a single file buffer to Cloudinary
+const uploadToCloudinary = (buffer, mimetype, folder) => {
+  return new Promise((resolve, reject) => {
+    const isVideo = mimetype.startsWith('video/');
+    const resourceType = isVideo ? 'video' : 'image';
 
-// ✅ Custom multer storage that routes to image or video storage based on mimetype
-const combinedStorage = {
-  _handleFile(req, file, cb) {
-    if (file.mimetype.startsWith('video/')) {
-      videoStorage._handleFile(req, file, cb);
-    } else {
-      imageStorage._handleFile(req, file, cb);
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: folder || (isVideo ? 'monasoap-products-videos' : 'monasoap-products'),
+        resource_type: resourceType,
+        ...(isVideo ? {} : {
+          transformation: [{ width: 1000, height: 1000, crop: 'limit' }]
+        })
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url); // ✅ always returns full https:// URL
+      }
+    );
+
+    uploadStream.end(buffer);
+  });
+};
+
+// ✅ Upload all files and separate into images/videos
+const uploadFiles = async (files) => {
+  const images = [];
+  const videos = [];
+
+  if (!files || files.length === 0) return { images, videos };
+
+  for (const file of files) {
+    try {
+      const url = await uploadToCloudinary(file.buffer, file.mimetype);
+      if (file.mimetype.startsWith('video/')) {
+        videos.push(url);
+      } else {
+        images.push(url);
+      }
+    } catch (err) {
+      console.error(`❌ Failed to upload ${file.originalname}:`, err.message);
     }
-  },
-  _removeFile(req, file, cb) {
-    if (file.mimetype.startsWith('video/')) {
-      videoStorage._removeFile(req, file, cb);
-    } else {
-      imageStorage._removeFile(req, file, cb);
-    }
+  }
+
+  return { images, videos };
+};
+
+// ✅ Delete a file from Cloudinary by URL
+const deleteFromCloudinary = async (url, resourceType = 'image') => {
+  try {
+    if (!url || !url.startsWith('http')) return;
+    const urlParts = url.split('/');
+    const uploadIndex = urlParts.indexOf('upload');
+    if (uploadIndex === -1) return;
+    const withVersion = urlParts.slice(uploadIndex + 1);
+    const withoutVersion = withVersion[0].startsWith('v') && /^v\d+$/.test(withVersion[0])
+      ? withVersion.slice(1)
+      : withVersion;
+    const publicId = withoutVersion.join('/').replace(/\.[^/.]+$/, '');
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+    console.log(`🗑️ Deleted from Cloudinary: ${publicId}`);
+  } catch (err) {
+    console.error('Error deleting from Cloudinary:', err.message);
   }
 };
 
-const upload = multer({
-  storage: combinedStorage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB max per file
-});
-
-// GET all products (with optional search and category filters)
+// ──────────────────────────────────────────
+// GET all products
+// ──────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const { search, category } = req.query;
     let query = {};
-
-    if (search && search.trim()) {
-      query.name = { $regex: search.trim(), $options: 'i' };
-    }
-    if (category && category.trim()) {
-      query.category = category;
-    }
-
+    if (search && search.trim()) query.name = { $regex: search.trim(), $options: 'i' };
+    if (category && category.trim()) query.category = category;
     const products = await Product.find(query).sort({ createdAt: -1 });
     res.json(products);
   } catch (error) {
@@ -71,7 +95,9 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────
 // GET single product
+// ──────────────────────────────────────────
 router.get('/:id', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
@@ -83,26 +109,16 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// ✅ Helper: separate uploaded files into images and videos
-const separateFiles = (files) => {
-  const images = [];
-  const videos = [];
-  if (files && files.length > 0) {
-    for (const file of files) {
-      if (file.mimetype && file.mimetype.startsWith('video/')) {
-        videos.push(file.path); // full Cloudinary URL
-      } else {
-        images.push(file.path); // full Cloudinary URL
-      }
-    }
-  }
-  return { images, videos };
-};
-
-// CREATE product with image and video uploads
+// ──────────────────────────────────────────
+// CREATE product
+// ──────────────────────────────────────────
 router.post('/', upload.array('images', 10), async (req, res) => {
   try {
-    const { images, videos: uploadedVideos } = separateFiles(req.files);
+    console.log(`📦 Creating product: ${req.body.name}`);
+    console.log(`📁 Files received: ${req.files?.length || 0}`);
+
+    // Upload all files to Cloudinary
+    const { images, videos: uploadedVideos } = await uploadFiles(req.files);
 
     // Also accept video URLs passed as strings in body
     let bodyVideos = [];
@@ -110,19 +126,20 @@ router.post('/', upload.array('images', 10), async (req, res) => {
       try {
         bodyVideos = typeof req.body.videos === 'string'
           ? JSON.parse(req.body.videos)
-          : req.body.videos;
+          : Array.isArray(req.body.videos) ? req.body.videos : [];
       } catch { bodyVideos = []; }
     }
 
+    const qty = parseInt(req.body.quantity) || 0;
     const productData = {
       name: req.body.name,
       description: req.body.description,
       price: parseFloat(req.body.price),
       category: req.body.category,
-      quantity: parseInt(req.body.quantity) || 0,
-      images: images,
+      quantity: qty,
+      images,
       videos: [...uploadedVideos, ...bodyVideos],
-      isAvailable: (parseInt(req.body.quantity) || 0) > 0
+      isAvailable: qty > 0
     };
 
     const product = new Product(productData);
@@ -138,63 +155,56 @@ router.post('/', upload.array('images', 10), async (req, res) => {
   }
 });
 
-// UPDATE product with optional new images/videos
+// ──────────────────────────────────────────
+// UPDATE product
+// ──────────────────────────────────────────
 router.put('/:id', upload.array('images', 10), async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
 
+    console.log(`📦 Updating product: ${product.name}`);
+    console.log(`📁 Files received: ${req.files?.length || 0}`);
+
     // Update text fields
-    if (req.body.name) product.name = req.body.name;
-    if (req.body.description) product.description = req.body.description;
-    if (req.body.price) product.price = parseFloat(req.body.price);
-    if (req.body.category) product.category = req.body.category;
+    if (req.body.name !== undefined) product.name = req.body.name;
+    if (req.body.description !== undefined) product.description = req.body.description;
+    if (req.body.price !== undefined) product.price = parseFloat(req.body.price);
+    if (req.body.category !== undefined) product.category = req.body.category;
     if (req.body.quantity !== undefined) {
       product.quantity = parseInt(req.body.quantity);
       product.isAvailable = product.quantity > 0;
     }
 
-    // If new files were uploaded
+    // If new files uploaded, delete old ones and replace
     if (req.files && req.files.length > 0) {
-      const { images: newImages, videos: newVideos } = separateFiles(req.files);
+      const { images: newImages, videos: newVideos } = await uploadFiles(req.files);
 
-      // Delete old images from Cloudinary and replace
       if (newImages.length > 0) {
-        if (product.images && product.images.length > 0) {
-          for (const oldUrl of product.images) {
-            try {
-              const publicId = extractPublicId(oldUrl);
-              if (publicId) await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
-            } catch (err) {
-              console.error('Error deleting old image:', err);
-            }
-          }
+        // Delete old images
+        for (const url of product.images || []) {
+          await deleteFromCloudinary(url, 'image');
         }
         product.images = newImages;
+        console.log(`🖼️ Images updated (${newImages.length}):`, newImages);
       }
 
-      // Delete old videos from Cloudinary and replace
       if (newVideos.length > 0) {
-        if (product.videos && product.videos.length > 0) {
-          for (const oldUrl of product.videos) {
-            try {
-              const publicId = extractPublicId(oldUrl);
-              if (publicId) await cloudinary.uploader.destroy(publicId, { resource_type: 'video' });
-            } catch (err) {
-              console.error('Error deleting old video:', err);
-            }
-          }
+        // Delete old videos
+        for (const url of product.videos || []) {
+          await deleteFromCloudinary(url, 'video');
         }
         product.videos = newVideos;
+        console.log(`🎥 Videos updated (${newVideos.length}):`, newVideos);
       }
     }
 
-    // Update videos from body if provided and no files uploaded
+    // Update videos from body if no files uploaded
     if (req.body.videos && (!req.files || req.files.length === 0)) {
       try {
         product.videos = typeof req.body.videos === 'string'
           ? JSON.parse(req.body.videos)
-          : req.body.videos;
+          : Array.isArray(req.body.videos) ? req.body.videos : product.videos;
       } catch (err) {
         console.error('Error parsing videos:', err);
       }
@@ -209,35 +219,16 @@ router.put('/:id', upload.array('images', 10), async (req, res) => {
   }
 });
 
-// DELETE product (and delete images/videos from Cloudinary)
+// ──────────────────────────────────────────
+// DELETE product
+// ──────────────────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
 
-    // Delete images from Cloudinary
-    if (product.images && product.images.length > 0) {
-      for (const url of product.images) {
-        try {
-          const publicId = extractPublicId(url);
-          if (publicId) await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
-        } catch (err) {
-          console.error('Error deleting image:', err);
-        }
-      }
-    }
-
-    // Delete videos from Cloudinary
-    if (product.videos && product.videos.length > 0) {
-      for (const url of product.videos) {
-        try {
-          const publicId = extractPublicId(url);
-          if (publicId) await cloudinary.uploader.destroy(publicId, { resource_type: 'video' });
-        } catch (err) {
-          console.error('Error deleting video:', err);
-        }
-      }
-    }
+    for (const url of product.images || []) await deleteFromCloudinary(url, 'image');
+    for (const url of product.videos || []) await deleteFromCloudinary(url, 'video');
 
     await product.deleteOne();
     console.log(`✅ Product deleted: ${product.name}`);
@@ -248,37 +239,18 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// Single image upload endpoint
+// ──────────────────────────────────────────
+// Single file upload endpoint
+// ──────────────────────────────────────────
 router.post('/upload', upload.single('image'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'No file uploaded' });
-    }
-    res.json({
-      success: true,
-      imageUrl: req.file.path,
-      publicId: req.file.filename
-    });
+    if (!req.file) return res.status(400).json({ success: false, error: 'No file uploaded' });
+    const url = await uploadToCloudinary(req.file.buffer, req.file.mimetype);
+    res.json({ success: true, imageUrl: url });
   } catch (error) {
     console.error('Upload error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
-// ✅ Helper: extract Cloudinary public_id from full URL
-function extractPublicId(url) {
-  try {
-    const urlParts = url.split('/');
-    const uploadIndex = urlParts.indexOf('upload');
-    if (uploadIndex === -1) return null;
-    const withVersion = urlParts.slice(uploadIndex + 1);
-    const withoutVersion = withVersion[0].startsWith('v') && /^v\d+$/.test(withVersion[0])
-      ? withVersion.slice(1)
-      : withVersion;
-    return withoutVersion.join('/').replace(/\.[^/.]+$/, '');
-  } catch {
-    return null;
-  }
-}
 
 module.exports = router;
