@@ -8,7 +8,7 @@ const Product = require('../models/Product');
 // ✅ Use memory storage - upload to Cloudinary manually
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB max per file
+  limits: { fileSize: 10 * 1024 * 1024 } // ✅ Reduced to 10MB — safer for Render free tier
 });
 
 // ✅ Accept BOTH 'images' and 'videos' fields from the form
@@ -20,6 +20,16 @@ const uploadFields = upload.fields([
 // ✅ Upload a single file buffer to Cloudinary
 const uploadToCloudinary = (buffer, mimetype, isVideo = false) => {
   return new Promise((resolve, reject) => {
+
+    // 🔍 DEBUG: log upload start
+    console.log(`☁️ Starting Cloudinary upload — size: ${buffer.length} bytes, type: ${mimetype}, isVideo: ${isVideo}`);
+
+    // ⏰ Timeout safety — Render free tier has 30s request limit
+    const timeout = setTimeout(() => {
+      console.error('⏰ Cloudinary upload TIMED OUT after 25s');
+      reject(new Error('Cloudinary upload timed out after 25s'));
+    }, 25000);
+
     const resourceType = isVideo ? 'video' : 'image';
     const folder = isVideo ? 'monasoap-products-videos' : 'monasoap-products';
 
@@ -28,15 +38,19 @@ const uploadToCloudinary = (buffer, mimetype, isVideo = false) => {
         folder,
         resource_type: resourceType,
         ...(!isVideo && {
-          transformation: [{ width: 1000, height: 1000, crop: 'limit' }]
+          transformation: [{ width: 800, height: 800, crop: 'limit', quality: 'auto' }] // ✅ compress images
         })
       },
       (error, result) => {
+        clearTimeout(timeout); // ✅ always clear timeout
+
         if (error) {
-          console.error('Cloudinary upload error:', error);
+          console.error('❌ Cloudinary upload FAILED:', error.message, error);
           return reject(error);
         }
-        resolve(result.secure_url); // ✅ full https:// URL
+
+        console.log(`✅ Cloudinary upload SUCCESS: ${result.secure_url}`);
+        resolve(result.secure_url);
       }
     );
 
@@ -58,7 +72,7 @@ const deleteFromCloudinary = async (url, resourceType = 'image') => {
         : withVersion;
     const publicId = withoutVersion.join('/').replace(/\.[^/.]+$/, '');
     await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
-    console.log(`🗑️ Deleted: ${publicId}`);
+    console.log(`🗑️ Deleted from Cloudinary: ${publicId}`);
   } catch (err) {
     console.error('Error deleting from Cloudinary:', err.message);
   }
@@ -105,7 +119,13 @@ router.post('/', uploadFields, async (req, res) => {
     const imageFiles = req.files?.images || [];
     const videoFiles = req.files?.videos || [];
 
-    console.log(`🖼️ Image files: ${imageFiles.length}, 🎥 Video files: ${videoFiles.length}`);
+    console.log(`🖼️ Image files received: ${imageFiles.length}, 🎥 Video files received: ${videoFiles.length}`);
+
+    if (imageFiles.length > 0) {
+      imageFiles.forEach((f, i) => {
+        console.log(`  Image[${i}]: ${f.originalname}, size: ${f.size} bytes, type: ${f.mimetype}`);
+      });
+    }
 
     // Upload images to Cloudinary
     const imageUrls = await Promise.all(
@@ -131,11 +151,11 @@ router.post('/', uploadFields, async (req, res) => {
 
     await product.save();
     console.log(`✅ Product created: ${product.name}`);
-    console.log(`🖼️ Images:`, imageUrls);
-    console.log(`🎥 Videos:`, videoUrls);
+    console.log(`🖼️ Saved image URLs:`, imageUrls);
+    console.log(`🎥 Saved video URLs:`, videoUrls);
     res.status(201).json(product);
   } catch (error) {
-    console.error('Error creating product:', error);
+    console.error('❌ Error creating product:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -163,8 +183,11 @@ router.put('/:id', uploadFields, async (req, res) => {
     const imageFiles = req.files?.images || [];
     const videoFiles = req.files?.videos || [];
 
+    console.log(`🖼️ New image files: ${imageFiles.length}, 🎥 New video files: ${videoFiles.length}`);
+
     // If new images uploaded → delete old + replace
     if (imageFiles.length > 0) {
+      console.log(`🗑️ Deleting ${product.images?.length || 0} old image(s) from Cloudinary...`);
       for (const url of product.images || []) {
         await deleteFromCloudinary(url, 'image');
       }
@@ -176,6 +199,7 @@ router.put('/:id', uploadFields, async (req, res) => {
 
     // If new videos uploaded → delete old + replace
     if (videoFiles.length > 0) {
+      console.log(`🗑️ Deleting ${product.videos?.length || 0} old video(s) from Cloudinary...`);
       for (const url of product.videos || []) {
         await deleteFromCloudinary(url, 'video');
       }
@@ -189,7 +213,7 @@ router.put('/:id', uploadFields, async (req, res) => {
     console.log(`✅ Product updated: ${product.name}`);
     res.json(product);
   } catch (error) {
-    console.error('Error updating product:', error);
+    console.error('❌ Error updating product:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -209,7 +233,7 @@ router.delete('/:id', async (req, res) => {
     console.log(`✅ Product deleted: ${product.name}`);
     res.json({ message: 'Product deleted successfully' });
   } catch (error) {
-    console.error('Error deleting product:', error);
+    console.error('❌ Error deleting product:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -220,10 +244,11 @@ router.delete('/:id', async (req, res) => {
 router.post('/upload', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'No file uploaded' });
+    console.log(`📤 Single upload: ${req.file.originalname}, size: ${req.file.size} bytes`);
     const url = await uploadToCloudinary(req.file.buffer, req.file.mimetype, false);
     res.json({ success: true, imageUrl: url });
   } catch (error) {
-    console.error('Upload error:', error);
+    console.error('❌ Upload error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
